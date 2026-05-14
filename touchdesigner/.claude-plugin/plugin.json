@@ -1,7 +1,7 @@
 {
-  "name": "touchdesigner",
-  "description": "TouchDesigner integration for Claude Code - Execute Python, query editor state, and manage operators",
+  "name": "touchdesigner-gmss",
+  "description": "TouchDesigner integration (Shin's fork) — Python execution, editor queries, operator helpers + custom layout conventions",
   "author": {
-    "name": "satoruhiga"
+    "name": "gamsasyo (fork of satoruhiga/claude-touchdesigner)"
   }
 }

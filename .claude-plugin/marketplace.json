@@ -1,16 +1,16 @@
 {
-  "name": "claude-touchdesigner",
-  "description": "Claude Code plugins for TouchDesigner",
+  "name": "touchdesigner-claude-gmss",
+  "description": "Shin's fork of claude-touchdesigner — TD integration for Claude Code with custom layout rules and helpers",
   "owner": {
-    "name": "Satoru Higa",
-    "email": "satoruhiga@gmail.com"
+    "name": "gamsasyo",
+    "email": "gamsasyo@gmail.com"
   },
   "plugins": [
     {
-      "name": "touchdesigner",
+      "name": "touchdesigner-gmss",
       "source": "./touchdesigner",
-      "description": "TouchDesigner integration for Claude Code - Execute Python, query editor state, and manage operators",
-      "version": "0.1.6"
+      "description": "TouchDesigner integration (Shin's fork) — Python execution, editor queries, operator helpers + layout conventions",
+      "version": "0.1.6-gmss.1"
     }
   ]
 }
