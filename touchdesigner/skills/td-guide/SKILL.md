@@ -55,8 +55,26 @@ new_op = op.TDAPI.CreateOp(base, gridSOP, 'grid1', x=0, y=0)
 ### Chain Operators
 
 ```python
-# Auto-connects and layouts with 200px spacing
+# Auto-connects and layouts with 250px spacing (LAYOUT_X_SPACING)
 chain = op.TDAPI.ChainOperators([grid, noise, null])
+```
+
+### Lay out a Geometry COMP group
+
+```python
+# After creating ops, this places them per the gmss convention:
+# - Instance chain on the same Y row as geo, ending one step left of geo
+# - Reference chain below geo, ending directly under geo (same X)
+op.TDAPI.LayoutGeoGroup(
+    geo1,
+    instance_chain=[lens1, null_box],
+    reference_chain=[sphere1, noise1, noise_curl, null_src],
+    geo_x=1050, geo_y=-70,
+)
+
+# Verify the layout is clean
+overlaps = op.TDAPI.VerifyNoOverlaps('/project1')
+# overlaps is a list of (name_a, name_b) — empty list means clean
 ```
 
 ### Check Errors
@@ -87,6 +105,7 @@ print(params)  # ['radx', 'rady', 'radz', ...]
 | When working on... | Read... |
 |-------------------|------------------|
 | **ALL tasks** | **`reference/basics.md`** (REQUIRED) |
+| **ALL tasks (layout)** | **`reference/layout-rules.md`** (REQUIRED — gmss convention) |
 | Operator families, data conversion | `reference/operator-families.md` |
 | Geometry COMP, Instancing | `reference/geometry-comp.md` |
 | Rendering, Camera, Light | `reference/rendering.md` |
@@ -134,6 +153,7 @@ Example: "Create instanced particles in a sphere shape"
 4. **Verify layout before creating** to avoid overlapping operators
 5. **Use relative paths** for references to nearby operators (same level or close hierarchy)
 6. **Geometry COMP: create shapes at parent level** - Don't create geometry inside COMP; prepare at parent and pass via In/Out
+7. **Apply the gmss layout convention** (see `reference/layout-rules.md`) — use `op.TDAPI.LayoutGeoGroup` for geo groups, `op.TDAPI.VerifyNoOverlaps` after any structural change
 
 ## MCP Tools Available
 

@@ -44,7 +44,22 @@ __all__ = [
     # Layout utilities
     'GetBounds', 'CheckOverlap', 'GetAllBounds',
     'FindEmptyArea', 'FindTypeConversionPosition',
+    # Layout-rule helpers (gmss fork)
+    'AlignReferenceUnderGeo', 'AlignInstanceChainWithGeo',
+    'LayoutGeoGroup', 'VerifyNoOverlaps',
 ]
+
+
+# =============================================================================
+# Layout constants (gmss layout convention)
+# See skills/td-guide/reference/layout-rules.md for the full convention.
+# =============================================================================
+
+LAYOUT_X_SPACING = 250        # X spacing within a chain
+LAYOUT_Y_FAMILY = 175         # Y spacing between rows of the same group
+LAYOUT_Y_GROUP = 300          # Y spacing between separate logical groups
+LAYOUT_GEO_Y_OFFSET = 20      # Geo COMP sits slightly below its instance row
+                              # (accounts for COMP's taller visual size)
 
 
 def MoveOp(self, target: OP | str, x: int, y: int) -> OP:
@@ -168,7 +183,8 @@ def ChainOperators(self, operators: list[OP]) -> list[OP]:
     """Connect operators in sequence with auto layout.
 
     Connects operators using inputConnectors (same family only).
-    Each operator is positioned 200px to the right of the previous one.
+    Each operator is positioned `LAYOUT_X_SPACING` (250px) to the right of
+    the previous one, matching the gmss layout convention.
 
     Args:
         operators: List of operators to chain [first, second, third, ...]
@@ -184,8 +200,6 @@ def ChainOperators(self, operators: list[OP]) -> list[OP]:
         For cross-family connections (SOP -> CHOP etc.), use par.sop/par.chop
         directly as conversion operators don't use inputConnectors.
     """
-    OFFSET_X = 200
-
     if not operators:
         return []
 
@@ -193,7 +207,7 @@ def ChainOperators(self, operators: list[OP]) -> list[OP]:
         prev_op = operators[i - 1]
         curr_op = operators[i]
         curr_op.inputConnectors[0].connect(prev_op)
-        MoveOp(self, curr_op, prev_op.nodeX + OFFSET_X, prev_op.nodeY)
+        MoveOp(self, curr_op, prev_op.nodeX + LAYOUT_X_SPACING, prev_op.nodeY)
 
     return operators
 
@@ -536,3 +550,173 @@ def FindTypeConversionPosition(
 
     # Fallback
     return pos_above
+
+
+# =============================================================================
+# Layout-rule helpers (gmss convention)
+#
+# These helpers enforce the project's node-layout convention so networks stay
+# scannable as they grow. See skills/td-guide/reference/layout-rules.md.
+#
+# Core idea:
+#   - Wired chain (feeding geo.in1)        -> SAME Y row as geo COMP.
+#   - Reference chain (referenced by name) -> BELOW geo, last node directly
+#                                             under geo (same X column).
+# =============================================================================
+
+def AlignReferenceUnderGeo(self, ref_chain, geo) -> list:
+    """Align a reference chain so its END node sits directly under the geo COMP.
+
+    The rule: the last node of a reference chain (the one consumed via a
+    parameter reference such as instanceop, instancerottoop, material, etc.)
+    is placed at (geo.nodeX, geo.nodeY - LAYOUT_Y_FAMILY). Earlier nodes in
+    the chain extend LEFT from there with LAYOUT_X_SPACING between them.
+
+    Args:
+        ref_chain: list of operators ordered as the data flow:
+            [source, ..., end_null]. end_null is the one referenced by geo.
+        geo: the geometry COMP this chain is referenced by (op or path string)
+
+    Returns:
+        list: the same chain (chainable)
+    """
+    if not ref_chain:
+        return []
+    if isinstance(geo, str):
+        geo = op(geo)
+
+    end_x = geo.nodeX
+    end_y = geo.nodeY - LAYOUT_Y_FAMILY
+
+    # Walk from the END of the chain back toward the SOURCE, placing each node
+    # LAYOUT_X_SPACING to the left of the next.
+    n = len(ref_chain)
+    for i, node in enumerate(reversed(ref_chain)):
+        x = end_x - (i * LAYOUT_X_SPACING)
+        MoveOp(self, node, x, end_y)
+
+    return ref_chain
+
+
+def AlignInstanceChainWithGeo(self, instance_chain, geo) -> list:
+    """Align a wired instance-shape chain on the same row as its geo COMP.
+
+    The rule: the chain that feeds geo.in1 via a wire sits at the same Y as
+    the geo (with LAYOUT_GEO_Y_OFFSET adjustment for COMP visual height).
+    The LAST node ends one LAYOUT_X_SPACING step to the left of geo, so the
+    wire from chain-end into geo.in1 is short and clear.
+
+    Args:
+        instance_chain: list of operators ordered as the data flow:
+            [shape, ..., null_into_geo].
+        geo: the geometry COMP receiving the chain via wire (op or path)
+
+    Returns:
+        list: the same chain
+    """
+    if not instance_chain:
+        return []
+    if isinstance(geo, str):
+        geo = op(geo)
+
+    end_x = geo.nodeX - LAYOUT_X_SPACING
+    end_y = geo.nodeY + LAYOUT_GEO_Y_OFFSET
+
+    for i, node in enumerate(reversed(instance_chain)):
+        x = end_x - (i * LAYOUT_X_SPACING)
+        MoveOp(self, node, x, end_y)
+
+    return instance_chain
+
+
+def LayoutGeoGroup(
+    self,
+    geo,
+    instance_chain: list | None = None,
+    reference_chain: list | None = None,
+    geo_x: int | None = None,
+    geo_y: int | None = None,
+):
+    """Lay out a Geometry COMP and its associated chains in one call.
+
+    Applies the project convention:
+      - Optionally move the geo COMP to (geo_x, geo_y).
+      - Place the instance (wired) chain on the same Y row as the geo,
+        ending one step left of geo.
+      - Place the reference chain below the geo, ending directly under it.
+
+    Args:
+        geo: Geometry COMP (op or path string).
+        instance_chain: optional list [shape, ..., null_into_geo] feeding geo.in1.
+        reference_chain: optional list [source, ..., end_null] referenced by
+            geo via a parameter (instanceop, instancerottoop, etc.).
+        geo_x: optional new X for the geo (keeps current if None).
+        geo_y: optional new Y for the geo (keeps current if None).
+
+    Returns:
+        OP: the geo (chainable).
+
+    Example:
+        # body group
+        op.TDAPI.LayoutGeoGroup(
+            geo1,
+            instance_chain=[lens1, null_box],
+            reference_chain=[sphere1, noise1, noise_curl, null_src],
+            geo_x=1050, geo_y=-70,
+        )
+    """
+    if isinstance(geo, str):
+        geo = op(geo)
+
+    if geo_x is not None or geo_y is not None:
+        MoveOp(
+            self, geo,
+            geo_x if geo_x is not None else geo.nodeX,
+            geo_y if geo_y is not None else geo.nodeY,
+        )
+
+    if instance_chain:
+        AlignInstanceChainWithGeo(self, instance_chain, geo)
+
+    if reference_chain:
+        AlignReferenceUnderGeo(self, reference_chain, geo)
+
+    return geo
+
+
+def VerifyNoOverlaps(
+    self,
+    base,
+    ignore_owner_docked: bool = True,
+) -> list:
+    """Check that no operators in `base` overlap visually.
+
+    Returns the list of overlapping (name_a, name_b) pairs. Empty list = clean.
+
+    Docked DATs (e.g. glslMAT's _vertex/_pixel/_info) are physically inside
+    their owner's bounding box and would always register as overlaps. With
+    ignore_owner_docked=True (default), such pairs are filtered out.
+
+    Args:
+        base: container operator or path string.
+        ignore_owner_docked: skip (owner, docked) pseudo-overlaps.
+
+    Returns:
+        list of (name_a, name_b) tuples for any real overlaps.
+    """
+    if isinstance(base, str):
+        base = op(base)
+
+    children = list(base.children)
+    bounds_list = [GetBounds(self, c) for c in children]
+
+    overlaps = []
+    for i in range(len(children)):
+        for j in range(i + 1, len(children)):
+            ci, cj = children[i], children[j]
+            if ignore_owner_docked:
+                if ci in cj.docked or cj in ci.docked:
+                    continue
+            if _aabb_overlap(bounds_list[i], bounds_list[j]):
+                overlaps.append((ci.name, cj.name))
+    return overlaps
