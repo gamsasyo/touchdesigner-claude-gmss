@@ -47,6 +47,8 @@ __all__ = [
     # Layout-rule helpers (gmss fork)
     'AlignReferenceUnderGeo', 'AlignInstanceChainWithGeo',
     'LayoutGeoGroup', 'VerifyNoOverlaps',
+    # Annotation helpers (gmss fork)
+    'MakeAnnotation',
 ]
 
 
@@ -179,15 +181,23 @@ def CreateGeometryComp(
     return geo, in_op, out_op
 
 
-def ChainOperators(self, operators: list[OP]) -> list[OP]:
-    """Connect operators in sequence with auto layout.
+CHAIN_X_MARGIN = 60  # gap between prev.max_x and next.nodeX in ChainOperators
 
-    Connects operators using inputConnectors (same family only).
-    Each operator is positioned `LAYOUT_X_SPACING` (250px) to the right of
-    the previous one, matching the gmss layout convention.
+
+def ChainOperators(self, operators: list[OP], margin: int = CHAIN_X_MARGIN) -> list[OP]:
+    """Connect operators in sequence with bounds-aware auto layout.
+
+    Connects operators using inputConnectors (same family only). Each
+    operator is positioned `margin` px to the RIGHT of the previous op's
+    actual right edge (computed from `GetBounds`, including docked DATs).
+    This keeps spacing consistent across mixed-width chains — e.g. a
+    `glslPOP` (290 px wide) and a `nullPOP` (130 px wide) in the same
+    chain no longer overlap.
 
     Args:
         operators: List of operators to chain [first, second, third, ...]
+        margin: Gap between prev.max_x and next.nodeX (default
+            `CHAIN_X_MARGIN` = 60 px).
 
     Returns:
         list[OP]: The same list of operators (for chaining)
@@ -207,7 +217,8 @@ def ChainOperators(self, operators: list[OP]) -> list[OP]:
         prev_op = operators[i - 1]
         curr_op = operators[i]
         curr_op.inputConnectors[0].connect(prev_op)
-        MoveOp(self, curr_op, prev_op.nodeX + LAYOUT_X_SPACING, prev_op.nodeY)
+        prev_bounds = GetBounds(self, prev_op)
+        MoveOp(self, curr_op, prev_bounds.max_x + margin, prev_op.nodeY)
 
     return operators
 
@@ -684,22 +695,189 @@ def LayoutGeoGroup(
     return geo
 
 
+def _aabb_encloses(outer: AABB, inner: AABB, slack: int = 4) -> bool:
+    """True if `outer` fully contains `inner` (with small tolerance).
+
+    Used by VerifyNoOverlaps to skip annotateCOMP boxes that intentionally
+    surround the nodes they label — those are not real overlaps.
+    """
+    return (outer.min_x - slack <= inner.min_x and
+            outer.min_y - slack <= inner.min_y and
+            outer.max_x + slack >= inner.max_x and
+            outer.max_y + slack >= inner.max_y)
+
+
+# =============================================================================
+# Annotation helpers (gmss convention)
+# =============================================================================
+
+# Padding defaults used by MakeAnnotation. Title room is bigger because
+# annotateCOMP title sits at the TOP of the box.
+ANN_PADDING_X       = 35
+ANN_PADDING_Y_BOT   = 25
+ANN_PADDING_Y_TOP   = 70   # extra room for title text
+
+# Style presets — keyed by `style` arg on MakeAnnotation.
+#   'group'       : dark neutral box that hugs a group of nodes
+#   'description' : blue label box for header/notes that don't enclose nodes
+ANN_STYLES = {
+    'group': {
+        'bg_color': (0.13, 0.17, 0.22),
+        'bg_alpha': 0.6,
+        'opacity':  0.7,
+    },
+    'description': {
+        'bg_color': (0.15, 0.32, 0.62),
+        'bg_alpha': 0.75,
+        'opacity':  0.85,
+    },
+}
+
+
+def MakeAnnotation(
+    self,
+    base,
+    name: str,
+    members: list | None = None,
+    title: str = '',
+    body: str = '',
+    style: str = 'group',
+    bounds: tuple | None = None,
+    padding_x: int = ANN_PADDING_X,
+    padding_y_bot: int = ANN_PADDING_Y_BOT,
+    padding_y_top: int = ANN_PADDING_Y_TOP,
+    encloseops: bool | None = None,
+    bg_color: tuple | None = None,
+    bg_alpha: float | None = None,
+    opacity: float | None = None,
+):
+    """Create (or refit) an annotateCOMP.
+
+    Two modes:
+
+    1. **Group annotation** (`style='group'`, default) — wraps a list of
+       operators. The box is sized via `GetBounds` of every member plus
+       paddings. `encloseops` defaults to True so the contained nodes
+       move with the annotation when it's dragged.
+
+    2. **Description annotation** (`style='description'`) — blue label
+       box for headers / standalone notes that don't enclose any nodes.
+       Pass `bounds=(x, y, w, h)` to position it. `encloseops` defaults
+       to False so nothing under the box accidentally follows it.
+
+    If an op named `name` already exists in `base`, it is RE-FITTED in
+    place (not recreated). Safe to call repeatedly after a layout pass.
+
+    Args:
+        base: parent container (op or path string).
+        name: annotation operator name.
+        members: list of operators (or path/name strings) to enclose.
+            Required for `style='group'`. Ignored for 'description'.
+        title: title text (top of the box).
+        body: optional body text.
+        style: 'group' (dark, hugs nodes) or 'description' (blue label).
+        bounds: optional explicit (x, y, w, h). Required for
+            `style='description'` if you want a label box; ignored when
+            `members` is given.
+        padding_x / padding_y_bot / padding_y_top: padding around the
+            member bounds (group mode only).
+        encloseops: if True, contained nodes move with the annotation
+            when dragged. Defaults to True for 'group' and False for
+            'description'.
+        bg_color / bg_alpha / opacity: visual overrides; default to the
+            style preset (see ANN_STYLES).
+
+    Returns:
+        the annotateCOMP operator.
+    """
+    if isinstance(base, str):
+        base = op(base)
+
+    preset = ANN_STYLES.get(style, ANN_STYLES['group'])
+    if bg_color is None: bg_color = preset['bg_color']
+    if bg_alpha is None: bg_alpha = preset['bg_alpha']
+    if opacity is None:  opacity  = preset['opacity']
+    if encloseops is None:
+        encloseops = (style != 'description')
+
+    # Resolve geometry: members → union bounds, or explicit bounds
+    if members:
+        ops_ = []
+        for m in members:
+            if isinstance(m, str):
+                o = base.op(m) or op(m)
+            else:
+                o = m
+            if o is not None:
+                ops_.append(o)
+        if not ops_:
+            raise ValueError(f"MakeAnnotation: no resolvable members for '{name}'")
+        bs = [GetBounds(self, o) for o in ops_]
+        min_x = min(b.min_x for b in bs) - padding_x
+        max_x = max(b.max_x for b in bs) + padding_x
+        min_y = min(b.min_y for b in bs) - padding_y_bot
+        max_y = max(b.max_y for b in bs) + padding_y_top
+    elif bounds is not None:
+        x, y, w, h = bounds
+        min_x, min_y = x, y
+        max_x, max_y = x + w, y + h
+    else:
+        raise ValueError(
+            f"MakeAnnotation('{name}'): need either `members` (group) or "
+            f"`bounds=(x,y,w,h)` (description)."
+        )
+
+    # Reuse if present, else create
+    a = base.op(name)
+    if a is None:
+        a = CreateOp(self, base, annotateCOMP, name, x=min_x, y=min_y)
+    else:
+        MoveOp(self, a, min_x, min_y)
+
+    a.nodeWidth  = max_x - min_x
+    a.nodeHeight = max_y - min_y
+
+    a.par.Titletext = title
+    a.par.Bodytext  = body
+    a.par.encloseops = encloseops
+
+    a.par.Backcolorr = bg_color[0]
+    a.par.Backcolorg = bg_color[1]
+    a.par.Backcolorb = bg_color[2]
+    a.par.Backcoloralpha = bg_alpha
+    a.par.Opacity = opacity
+    a.par.layerzone = 'belowgrid'
+
+    return a
+
+
 def VerifyNoOverlaps(
     self,
     base,
     ignore_owner_docked: bool = True,
+    ignore_annotation_enclosure: bool = True,
 ) -> list:
     """Check that no operators in `base` overlap visually.
 
     Returns the list of overlapping (name_a, name_b) pairs. Empty list = clean.
 
-    Docked DATs (e.g. glslMAT's _vertex/_pixel/_info) are physically inside
-    their owner's bounding box and would always register as overlaps. With
-    ignore_owner_docked=True (default), such pairs are filtered out.
+    Two classes of "pseudo-overlap" are filtered out by default:
+
+    1. **Owner ↔ docked-DAT** — glslMAT's `_vertex/_pixel/_info`, scriptSOP's
+       callback DAT, etc. are physically inside the owner's bounding box.
+       Filtered when `ignore_owner_docked=True` (default).
+
+    2. **annotateCOMP enclosing a labelled node** — an annotation box is
+       *meant* to surround the nodes it labels. If an `annotateCOMP` fully
+       contains another op's bounds, that pair is filtered. Filtered when
+       `ignore_annotation_enclosure=True` (default). Partial overlap of an
+       annotateCOMP with a node outside its group is still flagged.
 
     Args:
         base: container operator or path string.
         ignore_owner_docked: skip (owner, docked) pseudo-overlaps.
+        ignore_annotation_enclosure: skip annotateCOMP-fully-contains-node
+            pseudo-overlaps.
 
     Returns:
         list of (name_a, name_b) tuples for any real overlaps.
@@ -717,6 +895,21 @@ def VerifyNoOverlaps(
             if ignore_owner_docked:
                 if ci in cj.docked or cj in ci.docked:
                     continue
-            if _aabb_overlap(bounds_list[i], bounds_list[j]):
-                overlaps.append((ci.name, cj.name))
+            if not _aabb_overlap(bounds_list[i], bounds_list[j]):
+                continue
+
+            if ignore_annotation_enclosure:
+                ci_is_ann = ci.type == 'annotate' or ci.opType == 'annotateCOMP'
+                cj_is_ann = cj.type == 'annotate' or cj.opType == 'annotateCOMP'
+                if ci_is_ann and not cj_is_ann and _aabb_encloses(bounds_list[i], bounds_list[j]):
+                    continue
+                if cj_is_ann and not ci_is_ann and _aabb_encloses(bounds_list[j], bounds_list[i]):
+                    continue
+                # nested annotations enclosing each other: skip too
+                if ci_is_ann and cj_is_ann:
+                    if (_aabb_encloses(bounds_list[i], bounds_list[j]) or
+                        _aabb_encloses(bounds_list[j], bounds_list[i])):
+                        continue
+
+            overlaps.append((ci.name, cj.name))
     return overlaps

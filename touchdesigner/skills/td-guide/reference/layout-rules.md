@@ -48,10 +48,26 @@ The rules below were established by the project author (gamsasyo) on
    ```
 
 6. **Spacing constants.**
-   - `LAYOUT_X_SPACING` = 250 px — between ops in the same chain
+   - `LAYOUT_X_SPACING` = 250 px — *minimum* nominal spacing in a chain
    - `LAYOUT_Y_FAMILY` = 175 px — between rows of the same group
    - `LAYOUT_Y_GROUP` = 300 px+ — between logical groups
    - `LAYOUT_GEO_Y_OFFSET` = 20 px — geo COMP vertical offset from instance row
+
+   **★ These are NOMINAL.** Real node widths vary: standard ops 130 px,
+   COMPs 160 px, but **operators with docked DATs are wider**. The chain
+   layout must respect the actual right edge of each node, not a fixed
+   stride.
+
+   | Operator (with docked DATs) | Bounding-box width |
+   |-----------------------------|--------------------|
+   | `glslPOP`, `glslTOP`        | ~290 px (one info + one shader DAT) |
+   | `glslcopyPOP`, `glsladvancedPOP` | ~450 px (info + 2-3 shader DATs) |
+   | `glslMAT`                   | ~450 px (info + vertex + pixel DATs) |
+   | `scriptSOP/CHOP/TOP/DAT`    | ~290 px (callback DAT) |
+
+   Use `op.TDAPI.GetBounds(op).max_x` to get the *real* right edge before
+   placing the next op. `op.TDAPI.ChainOperators(...)` does this for you
+   automatically — prefer it over `MoveOp(node, prev.nodeX + 250, ...)`.
 
 7. **GEO column = single X column.** All `geometryCOMP`s line up in the
    same X column (e.g., X = 1050). Predictable scanning.
@@ -84,7 +100,9 @@ The rules below were established by the project author (gamsasyo) on
 
 14. **★ NO OVERLAPS.** Every op must have its own bounding box. Verify
     after every layout pass with `op.TDAPI.VerifyNoOverlaps(base)`. The
-    helper ignores (owner, docked-DAT) pseudo-overlaps automatically.
+    helper ignores (owner, docked-DAT) pseudo-overlaps automatically,
+    and skips `annotateCOMP → enclosed-node` pseudo-overlaps (annotation
+    boxes are *meant* to surround the nodes they label).
 
 ---
 
